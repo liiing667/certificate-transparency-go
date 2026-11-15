@@ -359,3 +359,157 @@ func TestContainsSCT(t *testing.T) {
 		})
 	}
 }
+
+// tamperSCTLogID replaces the SCT's LogID with an unrelated, non-empty value.
+// The signature itself remains valid, so only a LogID binding check can detect
+// that the SCT claims to originate from a different log.
+func tamperSCTLogID(t *testing.T, sct *ct.SignedCertificateTimestamp) {
+	t.Helper()
+	for i := range sct.LogID.KeyID {
+		sct.LogID.KeyID[i] = ^sct.LogID.KeyID[i]
+	}
+}
+
+func TestVerifySCTRejectsEmptyLogID(t *testing.T) {
+	pk, err := ct.PublicKeyFromB64(testdata.LogPublicKeyB64)
+	if err != nil {
+		t.Fatalf("error parsing public key: %s", err)
+	}
+
+	tests := []struct {
+		desc     string
+		chainPEM string
+		sct      []byte
+		embedded bool
+	}{
+		{
+			desc:     "non-embedded cert",
+			chainPEM: testdata.TestCertPEM + testdata.CACertPEM,
+			sct:      testdata.TestCertProof,
+		},
+		{
+			desc:     "non-embedded precert",
+			chainPEM: testdata.TestPreCertPEM + testdata.CACertPEM,
+			sct:      testdata.TestPreCertProof,
+		},
+		{
+			desc:     "embedded cert",
+			chainPEM: testdata.TestEmbeddedCertPEM + testdata.CACertPEM,
+			sct:      testdata.TestPreCertProof,
+			embedded: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.desc, func(t *testing.T) {
+			chain, err := x509util.CertificatesFromPEM([]byte(test.chainPEM))
+			if err != nil {
+				t.Fatalf("error parsing certificate chain: %s", err)
+			}
+
+			var sct ct.SignedCertificateTimestamp
+			if _, err := tls.Unmarshal(test.sct, &sct); err != nil {
+				t.Fatalf("error tls-unmarshalling sct: %s", err)
+			}
+			sct.LogID = ct.LogID{}
+
+			if test.embedded {
+				// The embedded-path checks that the SCT is present in the cert,
+				// so keep the cert's embedded copy of the tampered SCT in sync.
+				raw, err := tls.Marshal(sct)
+				if err != nil {
+					t.Fatalf("error tls-marshalling sct: %s", err)
+				}
+				chain[0].SCTList.SCTList[0].Val = raw
+			}
+
+			if err := VerifySCT(pk, chain, &sct, test.embedded); err == nil {
+				t.Errorf("VerifySCT(embedded=%t) accepted an SCT with empty LogID", test.embedded)
+			}
+		})
+	}
+}
+
+func TestVerifySCTRejectsMismatchedLogID(t *testing.T) {
+	pk, err := ct.PublicKeyFromB64(testdata.LogPublicKeyB64)
+	if err != nil {
+		t.Fatalf("error parsing public key: %s", err)
+	}
+
+	tests := []struct {
+		desc     string
+		chainPEM string
+		sct      []byte
+		embedded bool
+	}{
+		{
+			desc:     "non-embedded cert",
+			chainPEM: testdata.TestCertPEM + testdata.CACertPEM,
+			sct:      testdata.TestCertProof,
+		},
+		{
+			desc:     "non-embedded precert",
+			chainPEM: testdata.TestPreCertPEM + testdata.CACertPEM,
+			sct:      testdata.TestPreCertProof,
+		},
+		{
+			desc:     "embedded cert",
+			chainPEM: testdata.TestEmbeddedCertPEM + testdata.CACertPEM,
+			sct:      testdata.TestPreCertProof,
+			embedded: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.desc, func(t *testing.T) {
+			chain, err := x509util.CertificatesFromPEM([]byte(test.chainPEM))
+			if err != nil {
+				t.Fatalf("error parsing certificate chain: %s", err)
+			}
+
+			var sct ct.SignedCertificateTimestamp
+			if _, err := tls.Unmarshal(test.sct, &sct); err != nil {
+				t.Fatalf("error tls-unmarshalling sct: %s", err)
+			}
+			tamperSCTLogID(t, &sct)
+
+			if test.embedded {
+				raw, err := tls.Marshal(sct)
+				if err != nil {
+					t.Fatalf("error tls-marshalling sct: %s", err)
+				}
+				chain[0].SCTList.SCTList[0].Val = raw
+			}
+
+			if err := VerifySCT(pk, chain, &sct, test.embedded); err == nil {
+				t.Errorf("VerifySCT(embedded=%t) accepted an SCT whose LogID does not match the verifying key", test.embedded)
+			}
+		})
+	}
+}
+
+func TestVerifySCTWithVerifierRejectsMismatchedLogID(t *testing.T) {
+	pk, err := ct.PublicKeyFromB64(testdata.LogPublicKeyB64)
+	if err != nil {
+		t.Fatalf("error parsing public key: %s", err)
+	}
+	sv, err := ct.NewSignatureVerifier(pk)
+	if err != nil {
+		t.Fatalf("couldn't create signature verifier: %s", err)
+	}
+
+	chain, err := x509util.CertificatesFromPEM([]byte(testdata.TestCertPEM + testdata.CACertPEM))
+	if err != nil {
+		t.Fatalf("error parsing certificate chain: %s", err)
+	}
+
+	var sct ct.SignedCertificateTimestamp
+	if _, err := tls.Unmarshal(testdata.TestCertProof, &sct); err != nil {
+		t.Fatalf("error tls-unmarshalling sct: %s", err)
+	}
+	tamperSCTLogID(t, &sct)
+
+	if err := VerifySCTWithVerifier(sv, chain, &sct, false); err == nil {
+		t.Error("VerifySCTWithVerifier() accepted an SCT whose LogID does not match the verifier key")
+	}
+}

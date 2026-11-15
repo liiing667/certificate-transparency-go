@@ -16,7 +16,9 @@
 package logid
 
 import (
+	"crypto"
 	"crypto/sha256"
+	stdx509 "crypto/x509"
 	"encoding/base64"
 	"fmt"
 	"log"
@@ -62,6 +64,17 @@ func FromPubKeyB64(pubKeyB64 string) (LogID, error) {
 	pkBytes, err := base64.StdEncoding.DecodeString(pubKeyB64)
 	if err != nil {
 		return LogID{}, fmt.Errorf("error decoding public key %q from base64: %s", pubKeyB64, err)
+	}
+	return LogID(sha256.Sum256(pkBytes)), nil
+}
+
+// FromPubKey returns the LogID corresponding to the supplied public key, as
+// defined in RFC6962 sect. 3.2: the SHA-256 hash of the DER-encoded
+// SubjectPublicKeyInfo.
+func FromPubKey(pubKey crypto.PublicKey) (LogID, error) {
+	pkBytes, err := stdx509.MarshalPKIXPublicKey(pubKey)
+	if err != nil {
+		return LogID{}, fmt.Errorf("error marshalling public key to DER: %w", err)
 	}
 	return LogID(sha256.Sum256(pkBytes)), nil
 }

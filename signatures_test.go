@@ -25,6 +25,7 @@ import (
 	mrand "math/rand"
 	"testing"
 
+	"github.com/google/certificate-transparency-go/logid"
 	"github.com/google/certificate-transparency-go/tls"
 )
 
@@ -104,6 +105,9 @@ const (
 		"e022100f572568dbfe9a86490eb915c4ee16ad5ecd708fed35ed4e5cd1b2c3f087b4130"
 
 	sigTestKeyIDEC = "b69d879e3f2c4402556dcda2f6b2e02ff6b6df4789c53000e14f4b125ae847aa"
+
+	// sigTestKeyIDRSA is the SHA-256 hash of the DER-encoded sigTestRSAPublicKey.
+	sigTestKeyIDRSA = "cb7041486a0faa6a180e6aa0383e7789d7f391ea0016a08e66cda018a01ed677"
 )
 
 func mustDehex(t *testing.T, h string) []byte {
@@ -138,7 +142,7 @@ func sigTestSCTEC(t *testing.T) SignedCertificateTimestamp {
 
 func sigTestSCTRSA(t *testing.T) SignedCertificateTimestamp {
 	t.Helper()
-	return sigTestSCTWithSignature(t, sigTestCertSCTSignatureRSA, sigTestKeyIDEC)
+	return sigTestSCTWithSignature(t, sigTestCertSCTSignatureRSA, sigTestKeyIDRSA)
 }
 
 func sigTestECPublicKey(t *testing.T) crypto.PublicKey {
@@ -231,6 +235,49 @@ func TestVerifySCTSignatureEC(t *testing.T) {
 		t.Fatalf("Failed to verify signature on SCT: %v", err)
 	}
 
+}
+
+func TestSignatureVerifierLogID(t *testing.T) {
+	v := mustCreateSignatureVerifier(t, sigTestECPublicKey(t))
+	wantID, err := logid.FromBytes(mustDehex(t, sigTestKeyIDEC))
+	if err != nil {
+		t.Fatalf("Failed to build expected LogID: %v", err)
+	}
+	if got := v.LogID(); got != wantID {
+		t.Errorf("verifier LogID = %x, want %x", got, wantID)
+	}
+}
+
+func TestVerifySCTSignatureFailsForEmptyLogID(t *testing.T) {
+	v := mustCreateSignatureVerifier(t, sigTestECPublicKey(t))
+	sct := sigTestSCTEC(t)
+	sct.LogID = LogID{}
+	if err := v.VerifySCTSignature(sct, sigTestCertLogEntry(t)); err == nil {
+		t.Fatal("Successfully verified SCT with an empty LogID")
+	}
+}
+
+func TestVerifySCTSignatureFailsForMismatchedLogID(t *testing.T) {
+	v := mustCreateSignatureVerifier(t, sigTestECPublicKey(t))
+	// Signature is valid for the EC key, but the SCT claims to come from the
+	// (different) RSA test log.
+	sct := sigTestSCTEC(t)
+	copy(sct.LogID.KeyID[:], mustDehex(t, sigTestKeyIDRSA))
+	if err := v.VerifySCTSignature(sct, sigTestCertLogEntry(t)); err == nil {
+		t.Fatal("Successfully verified SCT whose LogID does not match the verifying key")
+	}
+}
+
+func TestVerifySCTSignatureRejectsSCTFromDifferentLogWithValidSignature(t *testing.T) {
+	// The RSA verifier's key validly verifies the RSA signature, but the SCT
+	// must still be rejected if its LogID does not bind to that key.
+	v := mustCreateSignatureVerifier(t, sigTestRSAPublicKey(t))
+	sct := sigTestSCTRSA(t)
+	sct.LogID = LogID{}
+	copy(sct.LogID.KeyID[:], mustDehex(t, sigTestKeyIDEC))
+	if err := v.VerifySCTSignature(sct, sigTestCertLogEntry(t)); err == nil {
+		t.Fatal("Successfully verified a validly signed SCT from a different log")
+	}
 }
 
 func TestVerifySCTSignatureRSA(t *testing.T) {
