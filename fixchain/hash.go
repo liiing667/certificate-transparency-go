@@ -26,6 +26,12 @@ const hashSize = sha256.Size
 var newHash = sha256.New
 
 func hash(c *x509.Certificate) (hash [hashSize]byte) {
+	if c == nil {
+		// Callers sometimes hash certificates from externally-supplied chains
+		// before they have been validated; return the zero hash rather than
+		// panicking so incomplete input can be reported as an error.
+		return
+	}
 	copy(hash[:], newHash().Sum(c.Raw))
 	return
 }
@@ -33,6 +39,9 @@ func hash(c *x509.Certificate) (hash [hashSize]byte) {
 func hashChain(ch []*x509.Certificate) (hash [hashSize]byte) {
 	h := newHash()
 	for _, c := range ch {
+		if c == nil {
+			continue
+		}
 		h.Write(newHash().Sum(c.Raw))
 	}
 	copy(hash[:], h.Sum(nil))
@@ -67,6 +76,11 @@ func (b bag) Len() int { return len(b.certs) }
 
 // Less implements sort.Sort(data Interface) for bag.
 func (b bag) Less(i, j int) bool {
+	if b.certs[i] == nil || b.certs[j] == nil {
+		// Keep nil entries sortable instead of panicking; they are rejected
+		// as invalid input by the fixer before any chain is published.
+		return b.certs[i] == nil && b.certs[j] != nil
+	}
 	ci := b.certs[i].Raw
 	cj := b.certs[j].Raw
 	if len(ci) != len(cj) {

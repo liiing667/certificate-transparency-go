@@ -64,6 +64,12 @@ func (e FixError) Equal(f *FixError) bool {
 		return false
 	}
 	for i := range e.Chain {
+		if e.Chain[i] == nil || f.Chain[i] == nil {
+			if e.Chain[i] != f.Chain[i] {
+				return false
+			}
+			continue
+		}
 		if !e.Chain[i].Equal(f.Chain[i]) {
 			return false
 		}
@@ -137,6 +143,10 @@ func (e FixError) MarshalJSON() ([]byte, error) {
 		m.Cert = e.Cert.Raw
 	}
 	for _, c := range e.Chain {
+		if c == nil {
+			// A nil chain member has no DER bytes to serialize.
+			continue
+		}
 		m.Chain = append(m.Chain, c.Raw)
 	}
 	m.URL = e.URL
@@ -210,6 +220,9 @@ func UnmarshalJSON(b []byte) (*FixError, error) {
 func dumpChainPEM(chain []*x509.Certificate) string {
 	var p string
 	for _, cert := range chain {
+		if cert == nil {
+			continue
+		}
 		p += dumpPEM(cert.Raw)
 	}
 	return p

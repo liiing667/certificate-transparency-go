@@ -35,6 +35,9 @@ func (d *dedupedChain) addCert(cert *x509.Certificate) {
 }
 
 func (d *dedupedChain) addCertToFront(cert *x509.Certificate) {
+	if cert == nil {
+		return
+	}
 	// Check that the certificate isn't being added twice.
 	for _, c := range d.certs {
 		if c.Equal(cert) {

@@ -2,6 +2,7 @@
 
 ## HEAD
 
+* fixchain: fail closed on nil leaf certificates and nil chain members instead of crashing; report the incomplete input as a `FixError` and only publish chains verified against the supplied roots
 * Bump trillian to v1.8.0, and drop tracing support by @phbnf
 * Fix `tls.Unmarshal` decoding a `Uint24` field from the start of the buffer instead of the field's offset by @robstradling
 * Switch Ed25519 import from deprecated `golang.org/x/crypto/ed25519` to stdlib `crypto/ed25519` by @JasonPowr

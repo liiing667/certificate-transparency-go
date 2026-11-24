@@ -64,6 +64,11 @@ func (fl *FixAndLog) QueueAllCertsInChain(chain []*x509.Certificate) {
 		fl.done.set(h, true)
 
 		for _, cert := range dchain.certs {
+			// Fail closed: a nil leaf can never be verified or logged, so
+			// don't queue it for the fixer.
+			if cert == nil {
+				continue
+			}
 			if fl.logger.IsPosted(cert) {
 				atomic.AddUint32(&fl.alreadyPosted, 1)
 				continue
@@ -79,7 +84,7 @@ func (fl *FixAndLog) QueueAllCertsInChain(chain []*x509.Certificate) {
 // represented by the logger.  Note: chain is expected to be in the order of
 // cert --> root.
 func (fl *FixAndLog) QueueChain(chain []*x509.Certificate) {
-	if chain != nil {
+	if len(chain) > 0 && chain[0] != nil {
 		if fl.logger.IsPosted(chain[0]) {
 			atomic.AddUint32(&fl.alreadyPosted, 1)
 			return

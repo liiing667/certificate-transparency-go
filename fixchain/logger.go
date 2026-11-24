@@ -68,7 +68,8 @@ func (l *Logger) IsPosted(cert *x509.Certificate) bool {
 
 // QueueChain adds the given chain to the queue to be posted to the log.
 func (l *Logger) QueueChain(chain []*x509.Certificate) {
-	if chain == nil {
+	if len(chain) == 0 || chain[0] == nil {
+		// Incomplete input can never be logged; fail closed.
 		return
 	}
 
@@ -152,6 +153,15 @@ func (l *Logger) postToLog(p *toPost) {
 }
 
 func (l *Logger) postChain(p *toPost) {
+	if len(p.chain) == 0 || p.chain[0] == nil {
+		// Incomplete input can never be logged; fail closed.
+		l.errors <- &FixError{
+			Type:  LogPostFailed,
+			Chain: p.chain,
+			Error: errNilCertificate,
+		}
+		return
+	}
 	h := hash(p.chain[0])
 	if l.postCertCache.get(h) {
 		atomic.AddUint32(&l.reposted, 1)
@@ -160,6 +170,14 @@ func (l *Logger) postChain(p *toPost) {
 
 	derChain := make([]ct.ASN1Cert, 0, len(p.chain))
 	for _, cert := range p.chain {
+		if cert == nil {
+			l.errors <- &FixError{
+				Type:  LogPostFailed,
+				Chain: p.chain,
+				Error: errNilChainMember,
+			}
+			return
+		}
 		derChain = append(derChain, ct.ASN1Cert{Data: cert.Raw})
 	}
 

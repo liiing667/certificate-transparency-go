@@ -17,10 +17,20 @@ package fixchain
 
 import (
 	"encoding/pem"
+	"errors"
 	"net/http"
 
 	"github.com/google/certificate-transparency-go/x509"
 )
+
+// errNilCertificate is reported (wrapped in a FixError) when a fix is
+// requested without a leaf certificate.  Without a leaf there is nothing to
+// fix or verify, so the request must fail closed rather than crash.
+var errNilCertificate = errors.New("nil leaf certificate supplied to chain fixer")
+
+// errNilChainMember is reported (wrapped in a FixError) when a supplied chain
+// contains a nil entry.  Such an entry can never be part of a valid chain.
+var errNilChainMember = errors.New("nil certificate in supplied chain")
 
 // Fix attempts to fix the certificate chain for the certificate that is passed
 // to it, with respect to the given roots.  Fix returns a list of successfully
@@ -47,7 +57,55 @@ type toFix struct {
 	cache *urlCache
 }
 
+// validate fails closed on incomplete input: a fix without a leaf
+// certificate, or with a nil member in the supplied chain, cannot produce a
+// verifiable chain and would otherwise crash the fixer with a nil pointer
+// dereference.  It returns a FixError describing the bad input instead of
+// entering the construct/fix pipeline, and never returns any chains.
+func (fix *toFix) validate() []*FixError {
+	var ferrs []*FixError
+	if fix.cert == nil {
+		ferrs = append(ferrs, &FixError{
+			Type:  FixFailed,
+			Chain: fix.chain.certs,
+			Error: errNilCertificate,
+		})
+	}
+	for _, cert := range fix.chain.certs {
+		if cert == nil {
+			ferrs = append(ferrs, &FixError{
+				Type: FixFailed,
+				Cert: fix.cert,
+				// Exclude nil members from the reported chain: a nil entry
+				// cannot be serialized (it has no Raw bytes) and would make
+				// the FixError itself unprintable/unmarshalable.
+				Chain: nonNilCerts(fix.chain.certs),
+				Error: errNilChainMember,
+			})
+		}
+	}
+	return ferrs
+}
+
+// nonNilCerts returns the non-nil certificates in chain.
+func nonNilCerts(chain []*x509.Certificate) []*x509.Certificate {
+	var certs []*x509.Certificate
+	for _, cert := range chain {
+		if cert != nil {
+			certs = append(certs, cert)
+		}
+	}
+	return certs
+}
+
 func (fix *toFix) handleChain() ([][]*x509.Certificate, []*FixError) {
+	// Fail closed on incomplete input rather than dereferencing a nil
+	// certificate during construction or fixing.  No chains are published
+	// for invalid input; the error is retained as consumable evidence.
+	if ferrs := fix.validate(); ferrs != nil {
+		return nil, ferrs
+	}
+
 	intermediates := x509.NewCertPool()
 	for _, c := range fix.chain.certs {
 		intermediates.AddCert(c)
