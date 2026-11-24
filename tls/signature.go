@@ -26,7 +26,6 @@ import (
 	_ "crypto/sha512" // For registration side-effect
 	"errors"
 	"fmt"
-	"log"
 	"math/big"
 
 	"github.com/google/certificate-transparency-go/asn1"
@@ -64,6 +63,12 @@ func generateHash(algo HashAlgorithm, data []byte) ([]byte, crypto.Hash, error) 
 
 // VerifySignature verifies that the passed in signature over data was created by the given PublicKey.
 func VerifySignature(pubKey crypto.PublicKey, data []byte, sig DigitallySigned) error {
+	// The CT protocol (RFC 6962) only permits SHA-256 as the hash algorithm
+	// in a DigitallySigned structure; reject anything else to prevent
+	// algorithm downgrade attacks.
+	if sig.Algorithm.Hash != SHA256 {
+		return fmt.Errorf("unsupported Algorithm.Hash in signature: %v", sig.Algorithm.Hash)
+	}
 	hash, hashType, err := generateHash(sig.Algorithm.Hash, data)
 	if err != nil {
 		return err
@@ -89,7 +94,7 @@ func VerifySignature(pubKey crypto.PublicKey, data []byte, sig DigitallySigned) 
 			return fmt.Errorf("failed to unmarshal DSA signature: %v", err)
 		}
 		if len(rest) != 0 {
-			log.Printf("Garbage following signature %q", rest)
+			return fmt.Errorf("garbage following DSA signature %q", rest)
 		}
 		if dsaSig.R.Sign() <= 0 || dsaSig.S.Sign() <= 0 {
 			return errors.New("DSA signature contained zero or negative values")
@@ -108,7 +113,7 @@ func VerifySignature(pubKey crypto.PublicKey, data []byte, sig DigitallySigned) 
 			return fmt.Errorf("failed to unmarshal ECDSA signature: %v", err)
 		}
 		if len(rest) != 0 {
-			log.Printf("Garbage following signature %q", rest)
+			return fmt.Errorf("garbage following ECDSA signature %q", rest)
 		}
 		if ecdsaSig.R.Sign() <= 0 || ecdsaSig.S.Sign() <= 0 {
 			return errors.New("ECDSA signature contained zero or negative values")

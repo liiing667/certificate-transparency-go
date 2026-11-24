@@ -40,25 +40,37 @@ func TestVerifySignature(t *testing.T) {
 		{PEM2PK(testdata.RsaPublicKeyPEM), "61626364", 99, tls.ECDSA, "unsupported Algorithm.Hash", "1234"},
 		{PEM2PK(testdata.RsaPublicKeyPEM), "61626364", tls.SHA256, 99, "unsupported Algorithm.Signature", "1234"},
 
+		// Only SHA-256 is allowed by the CT protocol; anything else is
+		// rejected even if the signature would otherwise be valid.
+		{PEM2PK(testdata.RsaPublicKeyPEM), "61626364", tls.MD5, tls.RSA, "unsupported Algorithm.Hash", "1234"},
+		{PEM2PK(testdata.RsaPublicKeyPEM), "61626364", tls.SHA1, tls.RSA, "unsupported Algorithm.Hash", "1234"},
+		{PEM2PK(testdata.DsaPublicKeyPEM), "61626364", tls.SHA1, tls.DSA, "unsupported Algorithm.Hash", testdata.DsaSignedAbcdHex},
+		{PEM2PK(testdata.EcdsaPublicKeyPEM), "61626364", tls.SHA384, tls.ECDSA, "unsupported Algorithm.Hash", "1234"},
+		{PEM2PK(testdata.EcdsaPublicKeyPEM), "61626364", tls.SHA512, tls.ECDSA, "unsupported Algorithm.Hash", "1234"},
+
 		{PEM2PK(testdata.RsaPublicKeyPEM), "61626364", tls.SHA256, tls.DSA, "cannot verify DSA", "1234"},
 		{PEM2PK(testdata.RsaPublicKeyPEM), "61626364", tls.SHA256, tls.ECDSA, "cannot verify ECDSA", "1234"},
 		{PEM2PK(testdata.RsaPublicKeyPEM), "61626364", tls.SHA256, tls.RSA, "verification error", "1234"},
 		{PEM2PK(testdata.RsaPublicKeyPEM), "61626364", tls.SHA256, tls.ECDSA, "cannot verify ECDSA", "1234"},
 
-		{PEM2PK(testdata.DsaPublicKeyPEM), "61626364", tls.SHA1, tls.RSA, "cannot verify RSA", "1234"},
-		{PEM2PK(testdata.DsaPublicKeyPEM), "61626364", tls.SHA1, tls.ECDSA, "cannot verify ECDSA", "1234"},
-		{PEM2PK(testdata.DsaPublicKeyPEM), "61626364", tls.SHA1, tls.DSA, "failed to unmarshal DSA signature", "1234"},
-		{PEM2PK(testdata.DsaPublicKeyPEM), "61626364", tls.SHA1, tls.DSA, "failed to verify DSA signature", "3006020101020101eeff"},
-		{PEM2PK(testdata.DsaPublicKeyPEM), "61626364", tls.SHA1, tls.DSA, "zero or negative values", "3006020100020181"},
+		{PEM2PK(testdata.DsaPublicKeyPEM), "61626364", tls.SHA256, tls.RSA, "cannot verify RSA", "1234"},
+		{PEM2PK(testdata.DsaPublicKeyPEM), "61626364", tls.SHA256, tls.ECDSA, "cannot verify ECDSA", "1234"},
+		{PEM2PK(testdata.DsaPublicKeyPEM), "61626364", tls.SHA256, tls.DSA, "failed to unmarshal DSA signature", "1234"},
+		{PEM2PK(testdata.DsaPublicKeyPEM), "61626364", tls.SHA256, tls.DSA, "failed to verify DSA signature", "3006020101020101"},
+		{PEM2PK(testdata.DsaPublicKeyPEM), "61626364", tls.SHA256, tls.DSA, "zero or negative values", "3006020100020181"},
+		// Trailing garbage after the ASN.1 signature is rejected.
+		{PEM2PK(testdata.DsaPublicKeyPEM), "61626364", tls.SHA256, tls.DSA, "garbage following DSA signature", testdata.DsaSignedAbcdSHA256Hex + "00"},
 
 		{PEM2PK(testdata.EcdsaPublicKeyPEM), "61626364", tls.SHA256, tls.RSA, "cannot verify RSA", "1234"},
 		{PEM2PK(testdata.EcdsaPublicKeyPEM), "61626364", tls.SHA256, tls.DSA, "cannot verify DSA", "1234"},
 		{PEM2PK(testdata.EcdsaPublicKeyPEM), "61626364", tls.SHA256, tls.ECDSA, "failed to unmarshal ECDSA signature", "1234"},
-		{PEM2PK(testdata.EcdsaPublicKeyPEM), "61626364", tls.SHA256, tls.ECDSA, "failed to verify ECDSA signature", "3006020101020101eeff"},
+		{PEM2PK(testdata.EcdsaPublicKeyPEM), "61626364", tls.SHA256, tls.ECDSA, "failed to verify ECDSA signature", "3006020101020101"},
 		{PEM2PK(testdata.EcdsaPublicKeyPEM), "61626364", tls.SHA256, tls.ECDSA, "zero or negative values", "3006020100020181"},
+		// Trailing garbage after the ASN.1 signature is rejected.
+		{PEM2PK(testdata.EcdsaPublicKeyPEM), "61626364", tls.SHA256, tls.ECDSA, "garbage following ECDSA signature", testdata.EcdsaSignedAbcdHex + "00"},
 
 		{PEM2PK(testdata.RsaPublicKeyPEM), "61626364", tls.SHA256, tls.RSA, "", testdata.RsaSignedAbcdHex},
-		{PEM2PK(testdata.DsaPublicKeyPEM), "61626364", tls.SHA1, tls.DSA, "", testdata.DsaSignedAbcdHex},
+		{PEM2PK(testdata.DsaPublicKeyPEM), "61626364", tls.SHA256, tls.DSA, "", testdata.DsaSignedAbcdSHA256Hex},
 		{PEM2PK(testdata.EcdsaPublicKeyPEM), "61626364", tls.SHA256, tls.ECDSA, "", testdata.EcdsaSignedAbcdHex},
 	}
 	for _, test := range tests {

@@ -175,6 +175,15 @@ const (
 		"2809e9141402205f34cc4b8ca12ebdf025bf36bbe1ff7d807d4cfe951ac1329a" +
 		"35a39f5e971f10"
 
+	// DsaSignedAbcdSHA256Hex was generated with:
+	//    echo -n "abcd" > sign.input
+	//    openssl dgst -sha256 -sign dsa.privkey.pem -out sign.dsa sign.input
+	// Note that this includes randomization so will give different results each time.
+	// Verify with:
+	//    openssl dgst -sha256 -verify dsa.pubkey.pem -signature sign.dsa sign.input
+	DsaSignedAbcdSHA256Hex = "304502203ccb05b0ca6ce9992ffa8728aee876621b8ae2eee380946b942e96" +
+		"ed102ffffc022100c8403194c250af4147fb4de5d0bf34d703309d0bcc891de5af6a73d41db77813"
+
 	// EcdsaPrivateKeyPEM was generated with:
 	//    openssl ecparam -genkey -name prime256v1 -noout -out ecdsa.privkey.pem
 	EcdsaPrivateKeyPEM = "-----BEGIN EC PRIVATE KEY-----\n" +
