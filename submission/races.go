@@ -16,6 +16,7 @@ package submission
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"strings"
 	"sync"
@@ -58,6 +59,11 @@ type safeSubmissionState struct {
 
 	results map[string]*submissionResult
 	cancels map[string]context.CancelFunc
+
+	// countedLogIDs tracks Log-identities (SCT LogIDs) that have already
+	// contributed to group requirements. Multiple URLs may be served by the
+	// same Log, and such duplicates must count only once.
+	countedLogIDs map[ct.LogID]bool
 }
 
 func newSafeSubmissionState(groups ctpolicy.LogPolicyData) *safeSubmissionState {
@@ -69,6 +75,7 @@ func newSafeSubmissionState(groups ctpolicy.LogPolicyData) *safeSubmissionState 
 	}
 	s.results = make(map[string]*submissionResult)
 	s.cancels = make(map[string]context.CancelFunc)
+	s.countedLogIDs = make(map[ct.LogID]bool)
 	return &s
 }
 
@@ -107,6 +114,18 @@ func (sub *safeSubmissionState) setResult(logURL string, sct *ct.SignedCertifica
 		sub.results[logURL] = &submissionResult{sct: sct, err: err}
 		return
 	}
+	// Aggregate SCTs by actual Log-identity rather than by URL: if another
+	// URL already delivered an SCT from the same Log, this SCT is a
+	// duplicate and must not count towards minimal inclusion numbers. The
+	// affected groups keep their remaining needs, so an incomplete policy
+	// still results in an explicit failure.
+	if sub.countedLogIDs[sct.LogID] {
+		sub.results[logURL] = &submissionResult{
+			err: fmt.Errorf("SCT from Log %q (URL %q) duplicates an already counted SCT from the same Log", base64.StdEncoding.EncodeToString(sct.LogID.KeyID[:]), logURL),
+		}
+		return
+	}
+	sub.countedLogIDs[sct.LogID] = true
 	// If at least one group needs that SCT, result is set. Otherwise dumped.
 	for groupName := range sub.logToGroups[logURL] {
 		// Ignore the base group (All-logs) here to check separately.

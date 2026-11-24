@@ -16,6 +16,7 @@ package submission
 
 import (
 	"context"
+	"crypto/sha256"
 	"regexp"
 	"sync"
 	"testing"
@@ -38,7 +39,10 @@ func testdataSCT() *ct.SignedCertificateTimestamp {
 type mockSubmitter struct {
 	fixedDelay              map[byte]time.Duration
 	firstLetterURLReqNumber map[byte]int
-	mu                      sync.Mutex
+	// aliases maps a log-URL to another log-URL whose Log-identity (SCT
+	// LogID) it shares, simulating multiple URLs fronting the same Log.
+	aliases map[string]string
+	mu      sync.Mutex
 }
 
 // Each request within same Log-group gets additional sleep period.
@@ -48,6 +52,13 @@ func (ms *mockSubmitter) SubmitToLog(_ context.Context, logURL string, _ []ct.AS
 	ms.firstLetterURLReqNumber[logURL[0]]++
 	ms.mu.Unlock()
 	sct := testdataSCT()
+	// Assign the SCT a Log-identity derived from the log-URL (or its alias),
+	// so that distinct Logs produce distinct SCTs.
+	identity := logURL
+	if alias, ok := ms.aliases[logURL]; ok {
+		identity = alias
+	}
+	sct.LogID = ct.LogID{KeyID: sha256.Sum256([]byte(identity))}
 	time.Sleep(time.Duration(500*reqNum)*time.Millisecond + ms.fixedDelay[logURL[0]])
 	return sct, nil
 }
@@ -116,6 +127,69 @@ func TestGetSCTs(t *testing.T) {
 				},
 			},
 			resultTrail: map[string]int{"a": 3},
+		},
+		{
+			// Two URLs fronting the same Log must not count twice: the
+			// group stays incomplete and an explicit failure is returned
+			// alongside the single collected SCT.
+			name: "duplicateLogIdentity",
+			sbMock: &mockSubmitter{
+				fixedDelay:              map[byte]time.Duration{'a': 0},
+				firstLetterURLReqNumber: make(map[byte]int),
+				aliases:                 map[string]string{"a2.com": "a1.com"},
+			},
+			groups: ctpolicy.LogPolicyData{
+				"a": {
+					Name:          "a",
+					LogURLs:       map[string]bool{"a1.com": true, "a2.com": true},
+					MinInclusions: 2,
+					IsBase:        false,
+					LogWeights:    map[string]float32{"a1.com": 1.0, "a2.com": 1.0},
+				},
+			},
+			resultTrail: map[string]int{"a": 1},
+			errRegexp:   regexp.MustCompile(`log-group\(s\) a didn't receive enough SCTs`),
+		},
+		{
+			// A duplicate Log-identity accompanied by a genuine second Log
+			// still satisfies the two-inclusion requirement.
+			name: "duplicateLogIdentityPlusGenuine",
+			sbMock: &mockSubmitter{
+				fixedDelay:              map[byte]time.Duration{'a': 0},
+				firstLetterURLReqNumber: make(map[byte]int),
+				aliases:                 map[string]string{"a2.com": "a1.com"},
+			},
+			groups: ctpolicy.LogPolicyData{
+				"a": {
+					Name:          "a",
+					LogURLs:       map[string]bool{"a1.com": true, "a2.com": true, "a3.com": true},
+					MinInclusions: 2,
+					IsBase:        false,
+					LogWeights:    map[string]float32{"a1.com": 1.0, "a2.com": 1.0, "a3.com": 1.0},
+				},
+			},
+			resultTrail: map[string]int{"a": 2},
+		},
+		{
+			// Duplicated Log-identity within the base (All-logs) group must
+			// not count twice either.
+			name: "duplicateLogIdentityBaseGroup",
+			sbMock: &mockSubmitter{
+				fixedDelay:              map[byte]time.Duration{'a': 0},
+				firstLetterURLReqNumber: make(map[byte]int),
+				aliases:                 map[string]string{"a2.com": "a1.com"},
+			},
+			groups: ctpolicy.LogPolicyData{
+				ctpolicy.BaseName: {
+					Name:          ctpolicy.BaseName,
+					LogURLs:       map[string]bool{"a1.com": true, "a2.com": true},
+					MinInclusions: 2,
+					IsBase:        true,
+					LogWeights:    map[string]float32{"a1.com": 1.0, "a2.com": 1.0},
+				},
+			},
+			resultTrail: map[string]int{ctpolicy.BaseName: 1},
+			errRegexp:   regexp.MustCompile(`log-group\(s\) All-logs didn't receive enough SCTs`),
 		},
 		{
 			name:   "chromeLike",
