@@ -296,6 +296,77 @@ func NewFromJSON(llData []byte) (*LogList, error) {
 	return &ll, nil
 }
 
+// Validate checks that the LogList is complete enough to be safely consumed.
+// JSON parsing alone accepts structurally truncated data such as null array
+// elements or log objects missing required fields, which later cause nil
+// pointer dereferences (e.g. in SelectByStatus) or unusable log clients.
+// A LogList without a log_list_timestamp is accepted so that older list
+// formats remain readable.
+func (ll *LogList) Validate() error {
+	if ll == nil {
+		return fmt.Errorf("log list is nil")
+	}
+	for oi, op := range ll.Operators {
+		if op == nil {
+			return fmt.Errorf("operator at index %d is null", oi)
+		}
+		if op.Name == "" {
+			return fmt.Errorf("operator at index %d has no name", oi)
+		}
+		for li, l := range op.Logs {
+			if l == nil {
+				return fmt.Errorf("log at operators[%d].logs[%d] is null", oi, li)
+			}
+			if err := l.validate(); err != nil {
+				return fmt.Errorf("log at operators[%d].logs[%d]: %w", oi, li, err)
+			}
+		}
+		for li, l := range op.TiledLogs {
+			if l == nil {
+				return fmt.Errorf("tiled log at operators[%d].tiled_logs[%d] is null", oi, li)
+			}
+			if err := l.validate(); err != nil {
+				return fmt.Errorf("tiled log at operators[%d].tiled_logs[%d]: %w", oi, li, err)
+			}
+		}
+	}
+	return nil
+}
+
+// validate checks the required fields of a single RFC 6962 Log.
+func (l *Log) validate() error {
+	switch {
+	case l.Description == "":
+		return fmt.Errorf("log is missing description")
+	case len(l.LogID) != sha256.Size:
+		return fmt.Errorf("log %q has invalid log_id length %d, want %d bytes", l.Description, len(l.LogID), sha256.Size)
+	case len(l.Key) == 0:
+		return fmt.Errorf("log %q is missing public key", l.Description)
+	case l.URL == "":
+		return fmt.Errorf("log %q is missing url", l.Description)
+	case l.MMD <= 0:
+		return fmt.Errorf("log %q has invalid mmd %d", l.Description, l.MMD)
+	}
+	return nil
+}
+
+// validate checks the required fields of a single Static CT API TiledLog.
+func (l *TiledLog) validate() error {
+	switch {
+	case l.Description == "":
+		return fmt.Errorf("tiled log is missing description")
+	case len(l.LogID) != sha256.Size:
+		return fmt.Errorf("tiled log %q has invalid log_id length %d, want %d bytes", l.Description, len(l.LogID), sha256.Size)
+	case len(l.Key) == 0:
+		return fmt.Errorf("tiled log %q is missing public key", l.Description)
+	case l.SubmissionURL == "":
+		return fmt.Errorf("tiled log %q is missing submission_url", l.Description)
+	case l.MMD <= 0:
+		return fmt.Errorf("tiled log %q has invalid mmd %d", l.Description, l.MMD)
+	}
+	return nil
+}
+
 // NewFromSignedJSON creates a LogList from JSON encoded data, checking a
 // signature along the way. The signature data should be provided as the
 // raw signature data.

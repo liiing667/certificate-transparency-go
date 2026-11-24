@@ -51,8 +51,12 @@ type logListRefresherImpl struct {
 	// updateMu limits LogListRefresherImpl to a single Refresh() at a time.
 	updateMu sync.RWMutex
 	lastJSON []byte
-	path     string
-	client   *http.Client
+	// lastTimestamp is the log_list_timestamp of the last accepted list. It
+	// is the zero value for lists that do not carry a timestamp, which keeps
+	// older list formats readable.
+	lastTimestamp time.Time
+	path          string
+	client        *http.Client
 }
 
 // NewCustomLogListRefresher creates and inits a LogListRefresherImpl instance.
@@ -71,26 +75,53 @@ func NewLogListRefresher(llPath string) LogListRefresher {
 
 // Refresh fetches the log list and returns its source, formed LogList and
 // timestamp if source has changed compared to previous Refresh.
+//
+// A refresh only produces a new generation when all of the following hold:
+//   - the downloaded JSON differs from the last accepted content (an identical
+//     re-send is a no-op and creates no new generation);
+//   - the JSON parses into a complete, well-formed LogList (truncated or
+//     malformed content is rejected);
+//   - the list is not older than the last accepted one, as determined by its
+//     log_list_timestamp.
+//
+// On any failure the previously accepted JSON (and therefore the previous
+// generation) is preserved.
 func (llr *logListRefresherImpl) Refresh() (*LogListData, error) {
 	llr.updateMu.Lock()
 	defer llr.updateMu.Unlock()
 
 	t := time.Now()
-	json, err := x509util.ReadFileOrURL(llr.path, llr.client)
+	jsonData, err := x509util.ReadFileOrURL(llr.path, llr.client)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read %q: %v", llr.path, err)
 	}
 
-	if bytes.Equal(json, llr.lastJSON) {
+	// Identical re-send of the current content is not a new generation.
+	if bytes.Equal(jsonData, llr.lastJSON) {
 		return nil, nil
 	}
 
-	ll, err := loglist3.NewFromJSON(json)
+	ll, err := loglist3.NewFromJSON(jsonData)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse %q: %v", llr.path, err)
 	}
-	llr.lastJSON = json
-	return &LogListData{JSON: json, List: ll, DownloadTime: t}, nil
+	// Reject structurally incomplete lists before they can reach consumers,
+	// where null elements or missing required fields would panic.
+	if err := ll.Validate(); err != nil {
+		return nil, fmt.Errorf("failed to validate %q: %v", llr.path, err)
+	}
+	// Never move backwards: a downloadable but older list must not replace the
+	// current generation. A missing timestamp on either side is treated as
+	// unknown, so timestamp-less (older format) lists stay acceptable.
+	if !llr.lastTimestamp.IsZero() && !ll.LogListTimestamp.IsZero() && ll.LogListTimestamp.Before(llr.lastTimestamp) {
+		return nil, fmt.Errorf("rejected stale log list from %q: timestamp %s is older than current %s",
+			llr.path, ll.LogListTimestamp.Format(time.RFC3339), llr.lastTimestamp.Format(time.RFC3339))
+	}
+	llr.lastJSON = jsonData
+	if !ll.LogListTimestamp.IsZero() {
+		llr.lastTimestamp = ll.LogListTimestamp
+	}
+	return &LogListData{JSON: jsonData, List: ll, DownloadTime: t}, nil
 }
 
 // LastJSON returns last version of Log list in JSON.

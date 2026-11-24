@@ -143,6 +143,79 @@ Init:
 	}
 }
 
+// TestManagerRefreshPublishesOnlyCompleteNonRegressingGenerations drives the
+// full refresher+manager path and confirms that malformed or rolled-back log
+// lists are never published, while identical re-sends create no generation and
+// a valid newer list does become the new generation.
+func TestManagerRefreshPublishesOnlyCompleteNonRegressingGenerations(t *testing.T) {
+	// Start from a complete, timestamped list.
+	initial := validRefresherLogList("2024-01-01T00:00:00Z")
+	f, err := createTempFile(initial)
+	if err != nil {
+		t.Fatalf("createTempFile() = (_, %v)", err)
+	}
+	defer os.Remove(f)
+
+	llr := NewLogListRefresher(f)
+	llm := NewLogListManager(llr, imf)
+	ctx := context.Background()
+
+	first, err := llm.RefreshLogList(ctx)
+	if err != nil {
+		t.Fatalf("first RefreshLogList() = (_, %v), want nil", err)
+	}
+	if first == nil {
+		t.Fatalf("first RefreshLogList() returned no generation")
+	}
+
+	// 1. Truncated object that parses but is incomplete.
+	if err := os.WriteFile(f, []byte(`{"log_list_timestamp":"2024-02-01T00:00:00Z","operators":[null]}`), 0644); err != nil {
+		t.Fatalf("WriteFile() = %v", err)
+	}
+	if _, err := llm.RefreshLogList(ctx); err == nil {
+		t.Errorf("RefreshLogList() accepted null operator, want error")
+	}
+	if latest, _ := llm.GetTwoLatestLogLists(); latest != first {
+		t.Errorf("latest generation changed after incomplete-list refresh")
+	}
+
+	// 2. Complete but older generation.
+	if err := os.WriteFile(f, []byte(validRefresherLogList("2023-01-01T00:00:00Z")), 0644); err != nil {
+		t.Fatalf("WriteFile() = %v", err)
+	}
+	if _, err := llm.RefreshLogList(ctx); err == nil {
+		t.Errorf("RefreshLogList() accepted older generation, want error")
+	}
+	if latest, _ := llm.GetTwoLatestLogLists(); latest != first {
+		t.Errorf("latest generation changed after rolled-back refresh")
+	}
+
+	// 3. Re-sending the currently accepted bytes creates no generation.
+	if err := os.WriteFile(f, []byte(initial), 0644); err != nil {
+		t.Fatalf("WriteFile() = %v", err)
+	}
+	if lld, err := llm.RefreshLogList(ctx); err != nil || lld != nil {
+		t.Errorf("RefreshLogList() re-send = (%v, %v), want (nil, nil)", lld, err)
+	}
+
+	// 4. A valid newer generation does publish and becomes the latest.
+	newer := strings.Replace(validRefresherLogList("2024-03-01T00:00:00Z"), "aviator", "aviator2", 1)
+	if err := os.WriteFile(f, []byte(newer), 0644); err != nil {
+		t.Fatalf("WriteFile() = %v", err)
+	}
+	second, err := llm.RefreshLogList(ctx)
+	if err != nil {
+		t.Fatalf("RefreshLogList() with valid newer list = (_, %v), want nil", err)
+	}
+	if second == nil {
+		t.Fatalf("RefreshLogList() with valid newer list returned no generation")
+	}
+	latest, previous := llm.GetTwoLatestLogLists()
+	if latest != second || previous != first {
+		t.Errorf("generations = (%p, %p), want (%p, %p)", latest, previous, second, first)
+	}
+}
+
 // Helper func building slice of N AssignedSCTs.
 func buildAssignedSCTs(t *testing.T, n int) []*AssignedSCT {
 	rawSCT := testdata.TestCertProof

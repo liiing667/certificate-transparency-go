@@ -98,10 +98,23 @@ func (llm *LogListManager) RefreshLogList(ctx context.Context) (*LogListData, er
 	if err != nil {
 		return nil, err
 	}
-	logListLastRefresh.Set(float64(time.Now().Unix()))
 	if ll == nil {
 		// No updates
 		return nil, nil
+	}
+	// Defence in depth: regardless of the refresher implementation, only a
+	// complete, well-formed list may be published. On rejection latestLL and
+	// previousLL are left untouched, so consumers keep the last good
+	// generation.
+	if ll.List == nil {
+		return nil, fmt.Errorf("refresher returned LogListData without a parsed LogList")
+	}
+	if err := ll.List.Validate(); err != nil {
+		return nil, fmt.Errorf("refusing to publish incomplete LogList: %v", err)
+	}
+	// The metric is only initialized by Run(), guard direct callers.
+	if logListLastRefresh != nil {
+		logListLastRefresh.Set(float64(time.Now().Unix()))
 	}
 	llm.mu.Lock()
 	defer llm.mu.Unlock()
