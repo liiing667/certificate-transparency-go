@@ -293,7 +293,109 @@ func NewFromJSON(llData []byte) (*LogList, error) {
 	if err := json.Unmarshal(llData, &ll); err != nil {
 		return nil, fmt.Errorf("failed to parse log list: %v", err)
 	}
+	if err := ll.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid log list: %v", err)
+	}
 	return &ll, nil
+}
+
+// Validate checks that the log list is internally consistent. In particular,
+// every log must have a complete LogID that matches the SHA-256 hash of its
+// public key, and any state that is present must describe exactly one status.
+// A missing State is allowed for backwards compatibility with older lists.
+func (ll *LogList) Validate() error {
+	if ll == nil {
+		return fmt.Errorf("log list is nil")
+	}
+	for _, op := range ll.Operators {
+		if op == nil {
+			return fmt.Errorf("log list contains a nil operator")
+		}
+		for _, log := range op.Logs {
+			if log == nil {
+				return fmt.Errorf("operator %q contains a nil log", op.Name)
+			}
+			if err := log.Validate(); err != nil {
+				return fmt.Errorf("operator %q: %v", op.Name, err)
+			}
+		}
+		for _, log := range op.TiledLogs {
+			if log == nil {
+				return fmt.Errorf("operator %q contains a nil tiled log", op.Name)
+			}
+			if err := log.Validate(); err != nil {
+				return fmt.Errorf("operator %q: %v", op.Name, err)
+			}
+		}
+	}
+	return nil
+}
+
+// Validate checks that the log entry has a complete identity and a consistent
+// state.
+func (log *Log) Validate() error {
+	if log == nil {
+		return fmt.Errorf("log is nil")
+	}
+	return validateLogEntry(log.Description, log.LogID, log.Key, log.URL, log.MMD, log.State)
+}
+
+// Validate checks that the tiled log entry has a complete identity and a
+// consistent state.
+func (log *TiledLog) Validate() error {
+	if log == nil {
+		return fmt.Errorf("tiled log is nil")
+	}
+	return validateLogEntry(log.Description, log.LogID, log.Key, log.SubmissionURL, log.MMD, log.State)
+}
+
+// Validate checks that a state, if present, describes exactly one status.
+// A nil state is valid for backwards compatibility with older lists.
+func (ls *LogStates) Validate() error {
+	if ls == nil {
+		return nil
+	}
+	statusCount := 0
+	for _, set := range []bool{
+		ls.Pending != nil,
+		ls.Qualified != nil,
+		ls.Usable != nil,
+		ls.ReadOnly != nil,
+		ls.Retired != nil,
+		ls.Rejected != nil,
+	} {
+		if set {
+			statusCount++
+		}
+	}
+	if statusCount != 1 {
+		return fmt.Errorf("%d states set, want exactly one", statusCount)
+	}
+	return nil
+}
+
+// validateLogEntry checks the identity and state of a single log list entry.
+func validateLogEntry(description string, logID, key []byte, url string, mmd int32, state *LogStates) error {
+	if len(logID) != sha256.Size {
+		return fmt.Errorf("log %q has an invalid (possibly truncated) LogID of %d bytes, want %d", description, len(logID), sha256.Size)
+	}
+	if len(key) == 0 {
+		return fmt.Errorf("log %q has no key", description)
+	}
+	keyHash := sha256.Sum256(key)
+	if !bytes.Equal(logID, keyHash[:]) {
+		return fmt.Errorf("log %q LogID does not match the SHA-256 hash of its key", description)
+	}
+	if url == "" {
+		return fmt.Errorf("log %q has no URL", description)
+	}
+	if mmd <= 0 {
+		return fmt.Errorf("log %q has an invalid MMD of %d", description, mmd)
+	}
+	if err := state.Validate(); err != nil {
+		return fmt.Errorf("log %q has %v", description, err)
+	}
+	return nil
 }
 
 // NewFromSignedJSON creates a LogList from JSON encoded data, checking a
