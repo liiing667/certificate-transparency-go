@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"log"
 
+	"github.com/google/certificate-transparency-go/logid"
 	"github.com/google/certificate-transparency-go/tls"
 	"github.com/google/certificate-transparency-go/x509"
 )
@@ -53,13 +54,23 @@ func PublicKeyFromB64(b64PubKey string) (crypto.PublicKey, error) {
 	return x509.ParsePKIXPublicKey(der)
 }
 
-// SignatureVerifier can verify signatures on SCTs and STHs
+// SignatureVerifier can verify signatures on SCTs and STHs.
 type SignatureVerifier struct {
 	PubKey crypto.PublicKey
+	// logID is the RFC 6962 LogID derived from PubKey (the SHA-256 hash of
+	// the DER-encoded public key).  It is used to bind an SCT to the log whose
+	// key verifies its signature, since the SCT signature input (RFC 6962
+	// sect. 3.2) does not include the LogID.
+	logID logid.LogID
 }
 
 // NewSignatureVerifier creates a new SignatureVerifier using the passed in PublicKey.
 func NewSignatureVerifier(pk crypto.PublicKey) (*SignatureVerifier, error) {
+	logID, err := logid.FromPubKey(pk)
+	if err != nil {
+		return nil, err
+	}
+
 	switch pkType := pk.(type) {
 	case *rsa.PublicKey:
 		if pkType.N.BitLen() < 2048 {
@@ -83,7 +94,13 @@ func NewSignatureVerifier(pk crypto.PublicKey) (*SignatureVerifier, error) {
 		return nil, fmt.Errorf("unsupported public key type %v", pkType)
 	}
 
-	return &SignatureVerifier{PubKey: pk}, nil
+	return &SignatureVerifier{PubKey: pk, logID: logID}, nil
+}
+
+// LogID returns the RFC 6962 LogID of the verifier's public key, i.e. the
+// SHA-256 hash of the key's DER-encoded SubjectPublicKeyInfo.
+func (s SignatureVerifier) LogID() logid.LogID {
+	return s.logID
 }
 
 // VerifySignature verifies the given signature sig matches the data.
@@ -93,6 +110,18 @@ func (s SignatureVerifier) VerifySignature(data []byte, sig tls.DigitallySigned)
 
 // VerifySCTSignature verifies that the SCT's signature is valid for the given LogEntry.
 func (s SignatureVerifier) VerifySCTSignature(sct SignedCertificateTimestamp, entry LogEntry) error {
+	// The data signed by an SCT (RFC 6962 sect. 3.2) does not include the
+	// LogID, so a valid signature alone does not prove that the SCT was issued
+	// by the log whose key verifies it.  Bind the SCT to this log by checking
+	// that its LogID matches the hash of the verifying public key, rejecting
+	// empty or mismatched LogIDs.
+	var emptyID LogID
+	if sct.LogID == emptyID {
+		return fmt.Errorf("SCT has an empty LogID, expected %s", s.logID)
+	}
+	if sct.LogID.KeyID != s.logID {
+		return fmt.Errorf("SCT LogID %x does not match verifier LogID %s", sct.LogID.KeyID, s.logID)
+	}
 	sctData, err := SerializeSCTSignatureInput(sct, entry)
 	if err != nil {
 		return err
@@ -102,6 +131,12 @@ func (s SignatureVerifier) VerifySCTSignature(sct SignedCertificateTimestamp, en
 
 // VerifySTHSignature verifies that the STH's signature is valid.
 func (s SignatureVerifier) VerifySTHSignature(sth SignedTreeHead) error {
+	// STH responses do not always carry a LogID (RFC 6962 does not include one
+	// in the get-sth response).  If the field is populated, however, it must
+	// identify the log whose key is used for verification.
+	if empty := (SHA256Hash{}); sth.LogID != empty && sth.LogID != SHA256Hash(s.logID) {
+		return fmt.Errorf("STH LogID %x does not match verifier LogID %s", sth.LogID, s.logID)
+	}
 	sthData, err := SerializeSTHSignatureInput(sth)
 	if err != nil {
 		return err

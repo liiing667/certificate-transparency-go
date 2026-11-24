@@ -80,6 +80,7 @@ func TestToSignedCertificateTimestamp(t *testing.T) {
 	// From the sct:
 	// {"sct_version":0,"id":"CEEUmABxUywWGQRgvPxH/cJlOvopLHKzf/hjrinMyfA=","timestamp":1512556025588,"extensions":"","signature":"BAMARjBEAiAJAPO7EKykH4eOQ81kTzKCb4IEWzcxTBdbdRCHLFPLFAIgBEoGXDUtcIaF3M5HWI+MxwkCQbvqR9TSGUHDCZoOr3Q="}
 	validLogID := "CEEUmABxUywWGQRgvPxH/cJlOvopLHKzf/hjrinMyfA="
+	emptyLogID := ""
 	longLogID := "CEEUmABxUywWGQRgvPxH/cJlOvopLHKzf/hjrinMyfA0"
 	shortLogID := "CEEUmABxUywWGQRgvPxH/cJlOvopLHKzf/hjrinMyf=="
 	validSCTSignature := "BAMARjBEAiAJAPO7EKykH4eOQ81kTzKCb4IEWzcxTBdbdRCHLFPLFAIgBEoGXDUtcIaF3M5HWI+MxwkCQbvqR9TSGUHDCZoOr3Q="
@@ -96,6 +97,12 @@ func TestToSignedCertificateTimestamp(t *testing.T) {
 			desc:      "success",
 			logID:     validLogID,
 			signature: validSCTSignature,
+		},
+		{
+			desc:      "log ID empty",
+			logID:     emptyLogID,
+			signature: validSCTSignature,
+			wantErr:   true,
 		},
 		{
 			desc:      "log ID too long",

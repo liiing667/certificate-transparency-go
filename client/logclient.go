@@ -26,7 +26,6 @@ import (
 
 	ct "github.com/google/certificate-transparency-go"
 	"github.com/google/certificate-transparency-go/jsonclient"
-	"github.com/google/certificate-transparency-go/tls"
 )
 
 // LogClient represents a client for a given CT Log instance
@@ -74,34 +73,9 @@ func (c *LogClient) addChainWithRetry(ctx context.Context, ctype ct.LogEntryType
 		return nil, err
 	}
 
-	var ds ct.DigitallySigned
-	if rest, err := tls.Unmarshal(resp.Signature, &ds); err != nil {
-		return nil, RspError{Err: err, StatusCode: httpRsp.StatusCode, Body: body}
-	} else if len(rest) > 0 {
-		return nil, RspError{
-			Err:        fmt.Errorf("trailing data (%d bytes) after DigitallySigned", len(rest)),
-			StatusCode: httpRsp.StatusCode,
-			Body:       body,
-		}
-	}
-
-	exts, err := base64.StdEncoding.DecodeString(resp.Extensions)
+	sct, err := resp.ToSignedCertificateTimestamp()
 	if err != nil {
-		return nil, RspError{
-			Err:        fmt.Errorf("invalid base64 data in Extensions (%q): %v", resp.Extensions, err),
-			StatusCode: httpRsp.StatusCode,
-			Body:       body,
-		}
-	}
-
-	var logID ct.LogID
-	copy(logID.KeyID[:], resp.ID)
-	sct := &ct.SignedCertificateTimestamp{
-		SCTVersion: resp.SCTVersion,
-		LogID:      logID,
-		Timestamp:  resp.Timestamp,
-		Extensions: ct.CTExtensions(exts),
-		Signature:  ds,
+		return nil, RspError{Err: err, StatusCode: httpRsp.StatusCode, Body: body}
 	}
 	if err := c.VerifySCTSignature(*sct, ctype, chain); err != nil {
 		return nil, RspError{Err: err, StatusCode: httpRsp.StatusCode, Body: body}

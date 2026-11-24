@@ -25,6 +25,7 @@ import (
 	mrand "math/rand"
 	"testing"
 
+	"github.com/google/certificate-transparency-go/logid"
 	"github.com/google/certificate-transparency-go/tls"
 )
 
@@ -103,7 +104,8 @@ const (
 		"3046022100befd8060563763a5e49ba53e6443c13f7624fd6403178113736e16012aca983" +
 		"e022100f572568dbfe9a86490eb915c4ee16ad5ecd708fed35ed4e5cd1b2c3f087b4130"
 
-	sigTestKeyIDEC = "b69d879e3f2c4402556dcda2f6b2e02ff6b6df4789c53000e14f4b125ae847aa"
+	sigTestKeyIDEC  = "b69d879e3f2c4402556dcda2f6b2e02ff6b6df4789c53000e14f4b125ae847aa"
+	sigTestKeyIDRSA = "cb7041486a0faa6a180e6aa0383e7789d7f391ea0016a08e66cda018a01ed677"
 )
 
 func mustDehex(t *testing.T, h string) []byte {
@@ -138,7 +140,7 @@ func sigTestSCTEC(t *testing.T) SignedCertificateTimestamp {
 
 func sigTestSCTRSA(t *testing.T) SignedCertificateTimestamp {
 	t.Helper()
-	return sigTestSCTWithSignature(t, sigTestCertSCTSignatureRSA, sigTestKeyIDEC)
+	return sigTestSCTWithSignature(t, sigTestCertSCTSignatureRSA, sigTestKeyIDRSA)
 }
 
 func sigTestECPublicKey(t *testing.T) crypto.PublicKey {
@@ -192,12 +194,15 @@ func sigTestDefaultSTH(t *testing.T) SignedTreeHead {
 	}
 	var rootHash SHA256Hash
 	copy(rootHash[:], mustDehex(t, sigTestDefaultRootHash))
+	var logID SHA256Hash
+	copy(logID[:], mustDehex(t, sigTestKeyIDEC))
 	return SignedTreeHead{
 		Version:           V1,
 		Timestamp:         sigTestDefaultSTHTimestamp,
 		TreeSize:          sigTestDefaultTreeSize,
 		SHA256RootHash:    rootHash,
 		TreeHeadSignature: ds,
+		LogID:             logID,
 	}
 }
 
@@ -231,6 +236,24 @@ func TestVerifySCTSignatureEC(t *testing.T) {
 		t.Fatalf("Failed to verify signature on SCT: %v", err)
 	}
 
+}
+
+func TestUID39065SignatureVerifierLogID(t *testing.T) {
+	v := mustCreateSignatureVerifier(t, sigTestECPublicKey(t))
+	wantID, err := logid.FromBytes(mustDehex(t, sigTestKeyIDEC))
+	if err != nil {
+		t.Fatalf("Failed to build expected LogID: %v", err)
+	}
+	if got := v.LogID(); got != wantID {
+		t.Errorf("verifier LogID = %x, want %x", got, wantID)
+	}
+}
+
+func TestUID39065VerifySCTSignatureFailsForEmptyLogID(t *testing.T) {
+	v := mustCreateSignatureVerifier(t, sigTestECPublicKey(t))
+	sct := sigTestSCTEC(t)
+	sct.LogID = LogID{}
+	expectVerifySCTToFail(t, v, sct, "Incorrectly verified signature with an empty LogID.")
 }
 
 func TestVerifySCTSignatureRSA(t *testing.T) {
@@ -300,6 +323,13 @@ func TestVerifySCTSignatureECFailsForIncorrectVersion(t *testing.T) {
 	expectVerifySCTToFail(t, v, sct, "Incorrectly verified signature with incorrect SCT Version.")
 }
 
+func TestUID39065VerifySCTSignatureFailsForDifferentLogID(t *testing.T) {
+	v := mustCreateSignatureVerifier(t, sigTestECPublicKey(t))
+	sct := sigTestSCTEC(t)
+	sct.LogID.KeyID[0] ^= 0xff
+	expectVerifySCTToFail(t, v, sct, "Incorrectly verified signature with a different log ID.")
+}
+
 func TestVerifySCTSignatureECFailsForIncorrectSignature(t *testing.T) {
 	v := mustCreateSignatureVerifier(t, sigTestECPublicKey(t))
 	testVerifySCTSignatureFailsForIncorrectSignature(t, sigTestSCTEC(t), v)
@@ -342,6 +372,20 @@ func expectVerifySTHToFail(t *testing.T, v SignatureVerifier, sth SignedTreeHead
 func TestVerifyValidSTH(t *testing.T) {
 	v := mustCreateSignatureVerifier(t, sigTestECPublicKey(t))
 	sth := sigTestDefaultSTH(t)
+	expectVerifySTHToPass(t, v, sth)
+}
+
+func TestUID39065VerifySTHFailsForDifferentLogID(t *testing.T) {
+	v := mustCreateSignatureVerifier(t, sigTestECPublicKey(t))
+	sth := sigTestDefaultSTH(t)
+	sth.LogID[0] ^= 0xff
+	expectVerifySTHToFail(t, v, sth)
+}
+
+func TestUID39065VerifySTHAllowsMissingLogID(t *testing.T) {
+	v := mustCreateSignatureVerifier(t, sigTestECPublicKey(t))
+	sth := sigTestDefaultSTH(t)
+	sth.LogID = SHA256Hash{}
 	expectVerifySTHToPass(t, v, sth)
 }
 

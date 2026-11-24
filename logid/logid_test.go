@@ -15,7 +15,9 @@
 package logid
 
 import (
+	"crypto/ecdsa"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/base64"
 	"log"
 	"reflect"
@@ -124,5 +126,58 @@ func TestFromPubKeyB64(t *testing.T) {
 		if got := base64.StdEncoding.EncodeToString(logID.Bytes()); got != test.want {
 			t.Errorf("%s: got? %s want? %s", test.desc, got, test.want)
 		}
+	}
+}
+
+func TestUID39065FromPubKey(t *testing.T) {
+	tests := []struct {
+		desc string
+		b64  string
+		want string
+	}{
+		{
+			desc: "ECDSA",
+			b64:  "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEfahLEimAoz2t01p3uMziiLOl/fHTDM0YDOhBRuiBARsV4UvxG2LdNgoIGLrtCzWE0J5APC2em4JlvR8EEEFMoA==",
+			want: "pLkJkLQYWBSHuxOizGdwCjw1mAT5G9+443fNDsgN3BA=",
+		},
+		{
+			desc: "RSA",
+			b64:  "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAolpIHxdSlTXLo1s6H1OCdpSj/4DyHDc8wLG9wVmLqy1lk9fz4ATVmm+/1iN2Nk8jmctUKK2MFUtlWXZBSpym97M7frGlSaQXUWyA3CqQUEuIJOmlEjKTBEiQAvpfDjCHjlV2Be4qTM6jamkJbiWtgnYPhJL6ONaGTiSPm7Byy57iaz/hbckldSOIoRhYBiMzeNoA0DiRZ9KmfSeXZ1rB8y8X5urSW+iBzf2SaOfzBvDpcoTuAaWx2DPazoOl28fP1hZ+kHUYvxbcMjttjauCFx+JII0dmuZNIwjfeG/GBb9frpSX219k1O4Wi6OEbHEr8at/XQ0y7gTikOxBn/s5wQIDAQAB",
+			want: "rDua7X+pZ0dXFZ5tfVdWcvnZgQCUHpve/+yhMTt1eC0=",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.desc, func(t *testing.T) {
+			der, err := base64.StdEncoding.DecodeString(test.b64)
+			if err != nil {
+				t.Fatalf("failed to decode base64 public key: %v", err)
+			}
+			pubKey, err := x509.ParsePKIXPublicKey(der)
+			if err != nil {
+				t.Fatalf("failed to parse public key: %v", err)
+			}
+			got, err := FromPubKey(pubKey)
+			if err != nil {
+				t.Fatalf("FromPubKey() returned unexpected error: %v", err)
+			}
+			if gotB64 := base64.StdEncoding.EncodeToString(got.Bytes()); gotB64 != test.want {
+				t.Errorf("FromPubKey() = %s, want %s", gotB64, test.want)
+			}
+
+			wantFromB64, err := FromPubKeyB64(test.b64)
+			if err != nil {
+				t.Fatalf("FromPubKeyB64() returned unexpected error: %v", err)
+			}
+			if got != wantFromB64 {
+				t.Errorf("FromPubKey() = %v, want %v (FromPubKeyB64)", got, wantFromB64)
+			}
+		})
+	}
+}
+
+func TestUID39065FromPubKeyErrors(t *testing.T) {
+	if _, err := FromPubKey(&ecdsa.PublicKey{}); err == nil {
+		t.Error("FromPubKey() with an unmarshallable key returned nil error, want non-nil")
 	}
 }

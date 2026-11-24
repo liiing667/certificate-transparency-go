@@ -132,9 +132,19 @@ func sctToJSON(rawSCT []byte) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to tls-unmarshal test certificate proof: %v", err)
 	}
-	data, err := json.Marshal(sct)
+	sig, err := tls.Marshal(sct.Signature)
 	if err != nil {
-		return nil, fmt.Errorf("failed to json-marshal test certificate proof: %v", err)
+		return nil, fmt.Errorf("failed to tls-marshal SCT signature: %v", err)
+	}
+	data, err := json.Marshal(&ct.AddChainResponse{
+		SCTVersion: sct.SCTVersion,
+		ID:         sct.LogID.KeyID[:],
+		Timestamp:  sct.Timestamp,
+		Extensions: base64.StdEncoding.EncodeToString(sct.Extensions),
+		Signature:  sig,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to json-marshal add-chain response: %v", err)
 	}
 	return data, nil
 }
