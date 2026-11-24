@@ -128,6 +128,11 @@ func (e RspError) Error() string {
 // New constructs a new JSONClient instance, for the given base URI, using the
 // given http.Client object (if provided) and the Options object.
 // If opts does not specify a public key, signatures will not be verified.
+//
+// The returned client never sends the configured Authorization header to a
+// different authority (scheme, host or port) when following redirects.  The
+// passed-in http.Client is not modified; a shallow copy is made so that any
+// CheckRedirect configured on it keeps working.
 func New(uri string, hc *http.Client, opts Options) (*JSONClient, error) {
 	pubkey, err := opts.ParsePublicKey()
 	if err != nil {
@@ -146,6 +151,12 @@ func New(uri string, hc *http.Client, opts Options) (*JSONClient, error) {
 	if hc == nil {
 		hc = new(http.Client)
 	}
+	// Wrap (rather than mutate) the caller's http.Client so that the
+	// Authorization header is removed before a redirect is followed to a
+	// different authority.  In particular, this prevents credentials leaking
+	// across ports on the same host, which the http package would otherwise
+	// allow.
+	hc = cloneAndProtectClient(hc)
 	logger := opts.Logger
 	if logger == nil {
 		logger = &basicLogger{}
@@ -164,6 +175,54 @@ func New(uri string, hc *http.Client, opts Options) (*JSONClient, error) {
 // BaseURI returns the base URI that the JSONClient makes queries to.
 func (c *JSONClient) BaseURI() string {
 	return c.uri
+}
+
+// cloneAndProtectClient returns a shallow copy of hc whose CheckRedirect
+// removes the Authorization header from requests that would be sent to a
+// different authority than the originating request.  Any CheckRedirect
+// previously configured on hc is still invoked afterwards (and the default
+// 10-redirect limit is preserved when none was set).
+func cloneAndProtectClient(hc *http.Client) *http.Client {
+	prev := hc.CheckRedirect
+	clone := *hc
+	clone.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if len(via) > 0 && !sameAuthority(via[0].URL, req.URL) {
+			req.Header.Del("Authorization")
+		}
+		if prev != nil {
+			return prev(req, via)
+		}
+		if len(via) >= 10 {
+			return errors.New("stopped after 10 redirects")
+		}
+		return nil
+	}
+	return &clone
+}
+
+// sameAuthority reports whether a and b identify the same origin, i.e. they
+// share the same scheme, host and port (using the default port for the scheme
+// when none is explicitly specified).
+func sameAuthority(a, b *url.URL) bool {
+	return a.Scheme == b.Scheme &&
+		strings.EqualFold(a.Hostname(), b.Hostname()) &&
+		effectivePort(a) == effectivePort(b)
+}
+
+// effectivePort returns the explicit port of u, or the default port for its
+// scheme when the URL does not specify one.
+func effectivePort(u *url.URL) string {
+	if p := u.Port(); p != "" {
+		return p
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "https":
+		return "443"
+	case "http":
+		return "80"
+	default:
+		return ""
+	}
 }
 
 // GetAndParse makes a HTTP GET call to the given path, and attempts to parse
@@ -207,8 +266,19 @@ func (c *JSONClient) GetAndParse(ctx context.Context, path string, params map[st
 		return nil, nil, RspError{Err: fmt.Errorf("got HTTP Status %q", httpRsp.Status), StatusCode: httpRsp.StatusCode, Body: body}
 	}
 
-	if err := json.NewDecoder(bytes.NewReader(body)).Decode(rsp); err != nil {
+	// Require the body to contain exactly one complete JSON value: reject
+	// truncated responses as well as a valid JSON object followed by any
+	// trailing data, which must not be treated as a successful response.
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	if err := decoder.Decode(rsp); err != nil {
 		return nil, nil, RspError{Err: err, StatusCode: httpRsp.StatusCode, Body: body}
+	}
+	var extra json.RawMessage
+	if err := decoder.Decode(&extra); err != io.EOF {
+		if err == nil {
+			err = errors.New("invalid character: trailing data after JSON value")
+		}
+		return nil, nil, RspError{Err: fmt.Errorf("response body is not a single complete JSON value: %w", err), StatusCode: httpRsp.StatusCode, Body: body}
 	}
 
 	return httpRsp, body, nil

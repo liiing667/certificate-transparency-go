@@ -20,8 +20,10 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"reflect"
 	"strconv"
 	"strings"
@@ -532,4 +534,270 @@ func TestCancelledContext(t *testing.T) {
 	if !errors.Is(err, context.Canceled) {
 		t.Errorf("PostAndParseWithRetry() = (_,_,%v), want %q", err, context.Canceled)
 	}
+}
+
+func TestSameAuthority(t *testing.T) {
+	tests := []struct {
+		name string
+		a    string
+		b    string
+		want bool
+	}{
+		{name: "identical", a: "http://example.com/ct/v1/get-sth", b: "http://example.com/ct/v1/get-roots", want: true},
+		{name: "default http port", a: "http://example.com:80/x", b: "http://example.com/y", want: true},
+		{name: "default https port", a: "https://example.com:443/x", b: "https://example.com/y", want: true},
+		{name: "case-insensitive host", a: "http://Example.COM/x", b: "http://example.com/y", want: true},
+		{name: "different port", a: "http://example.com:8080/x", b: "http://example.com:9090/y", want: false},
+		{name: "explicit port vs default port", a: "http://example.com:80/x", b: "http://example.com:8080/y", want: false},
+		{name: "different scheme", a: "http://example.com/x", b: "https://example.com/y", want: false},
+		{name: "different host", a: "http://a.example.com/x", b: "http://b.example.com/y", want: false},
+		{name: "subdomain is different", a: "http://example.com/x", b: "http://sub.example.com/y", want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			a, err := url.Parse(test.a)
+			if err != nil {
+				t.Fatalf("failed to parse %q: %v", test.a, err)
+			}
+			b, err := url.Parse(test.b)
+			if err != nil {
+				t.Fatalf("failed to parse %q: %v", test.b, err)
+			}
+			if got := sameAuthority(a, b); got != test.want {
+				t.Errorf("sameAuthority(%q, %q) = %v, want %v", test.a, test.b, got, test.want)
+			}
+		})
+	}
+}
+
+// scriptedRoundTripper returns canned responses without performing any real
+// network I/O, and records every request (including redirect follow-ups) so
+// that header handling can be inspected.
+type scriptedRoundTripper struct {
+	mu       sync.Mutex
+	rsps     []*http.Response
+	errs     []error
+	requests []*http.Request
+}
+
+func (s *scriptedRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	i := len(s.requests)
+	s.requests = append(s.requests, req)
+	if i < len(s.errs) && s.errs[i] != nil {
+		return nil, s.errs[i]
+	}
+	if i >= len(s.rsps) {
+		return nil, fmt.Errorf("scriptedRoundTripper: no scripted response for request %d to %q", i, req.URL)
+	}
+	rsp := s.rsps[i]
+	if rsp.Header == nil {
+		rsp.Header = http.Header{}
+	}
+	rsp.Request = req
+	return rsp, nil
+}
+
+func newResponse(statusCode int, body string) *http.Response {
+	return &http.Response{
+		StatusCode: statusCode,
+		Header:     http.Header{},
+		Body:       io.NopCloser(strings.NewReader(body)),
+	}
+}
+
+// TestGetAndParseStrictJSON makes sure that only a response body containing a
+// single complete JSON value is accepted; a valid JSON object followed by
+// trailing data must not be treated as success.
+func TestGetAndParseStrictJSON(t *testing.T) {
+	tests := []struct {
+		name    string
+		body    string
+		wantErr string
+	}{
+		{name: "single object", body: `{"tree_size": 11, "timestamp": 99}`},
+		{name: "single object with whitespace", body: "  {\"tree_size\": 11, \"timestamp\": 99}\n  "},
+		{name: "ok with trailing garbage", body: `{"ok":true}garbage`, wantErr: "not a single complete JSON value"},
+		{name: "two json objects", body: `{"ok":true} {"ok":true}`, wantErr: "not a single complete JSON value"},
+		{name: "trailing null", body: `{"ok":true}null`, wantErr: "not a single complete JSON value"},
+		{name: "truncated object", body: `{"tree_size": 11, "timestamp": 99`, wantErr: "unexpected EOF"},
+		{name: "empty body", body: ``, wantErr: "EOF"},
+	}
+
+	ctx := context.Background()
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			rt := &scriptedRoundTripper{rsps: []*http.Response{newResponse(http.StatusOK, test.body)}}
+			logClient, err := New("http://example.com", &http.Client{Transport: rt}, Options{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got TestStruct
+			_, _, err = logClient.GetAndParse(ctx, "/struct/path", nil, &got)
+			if test.wantErr == "" {
+				if err != nil {
+					t.Errorf("GetAndParse() = (_,_,%v), want nil error", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("GetAndParse() = (%+v,_,nil), want error containing %q", got, test.wantErr)
+			}
+			rspErr, ok := err.(RspError)
+			if !ok {
+				t.Fatalf("GetAndParse() error = %T, want RspError", err)
+			}
+			if !strings.Contains(rspErr.Err.Error(), test.wantErr) {
+				t.Errorf("GetAndParse() error = %q, want error containing %q", rspErr.Err.Error(), test.wantErr)
+			}
+			if rspErr.StatusCode != http.StatusOK {
+				t.Errorf("RspError.StatusCode = %d, want %d", rspErr.StatusCode, http.StatusOK)
+			}
+		})
+	}
+}
+
+// TestRedirectAuthorizationHandling verifies that the Authorization header is
+// stripped when a redirect crosses an authority boundary (including a port
+// change) but is retained for redirects within the same authority.
+func TestRedirectAuthorizationHandling(t *testing.T) {
+	const authToken = "Bearer secret-token"
+	tests := []struct {
+		name          string
+		location      string
+		wantAuthOnHop []string // expected Authorization header per request hop
+	}{
+		{
+			name:          "cross-port redirect strips authorization",
+			location:      "http://example.com:9090/elsewhere",
+			wantAuthOnHop: []string{authToken, ""},
+		},
+		{
+			name:          "cross-host redirect strips authorization",
+			location:      "http://other.example.com/elsewhere",
+			wantAuthOnHop: []string{authToken, ""},
+		},
+		{
+			name:          "cross-scheme redirect strips authorization",
+			location:      "https://example.com/elsewhere",
+			wantAuthOnHop: []string{authToken, ""},
+		},
+		{
+			name:          "same-authority redirect keeps authorization",
+			location:      "http://example.com/other/path",
+			wantAuthOnHop: []string{authToken, authToken},
+		},
+	}
+
+	ctx := context.Background()
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			redirect := newResponse(http.StatusFound, "")
+			redirect.Header.Set("Location", test.location)
+			rt := &scriptedRoundTripper{rsps: []*http.Response{
+				redirect,
+				newResponse(http.StatusOK, `{"tree_size": 11, "timestamp": 99}`),
+			}}
+			logClient, err := New("http://example.com", &http.Client{Transport: rt}, Options{Authorization: authToken})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got TestStruct
+			if _, _, err := logClient.GetAndParse(ctx, "/start", nil, &got); err != nil {
+				t.Fatalf("GetAndParse() = (_,_,%v), want nil error", err)
+			}
+			if len(rt.requests) != len(test.wantAuthOnHop) {
+				t.Fatalf("got %d request hops, want %d", len(rt.requests), len(test.wantAuthOnHop))
+			}
+			for i, want := range test.wantAuthOnHop {
+				if got := rt.requests[i].Header.Get("Authorization"); got != want {
+					t.Errorf("hop %d Authorization = %q, want %q", i, got, want)
+				}
+			}
+		})
+	}
+}
+
+// TestPostAndParseWithRetryStillWorks confirms that the normal retry path
+// (retryable failure followed by success against the same log) is unaffected.
+func TestPostAndParseWithRetryStillWorks(t *testing.T) {
+	rt := &scriptedRoundTripper{rsps: []*http.Response{
+		newResponse(http.StatusServiceUnavailable, "try later"),
+		newResponse(http.StatusOK, `{"tree_size": 11, "timestamp": 99}`),
+	}}
+	logClient, err := New("http://example.com", &http.Client{Transport: rt}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	logClient.backoff = &mockBackoff{}
+
+	var got TestStruct
+	httpRsp, _, err := logClient.PostAndParseWithRetry(context.Background(), "/struct/path", TestParams{}, &got)
+	if err != nil {
+		t.Fatalf("PostAndParseWithRetry() = (_,_,%v), want nil error", err)
+	}
+	if httpRsp.StatusCode != http.StatusOK {
+		t.Errorf("PostAndParseWithRetry() status = %d, want %d", httpRsp.StatusCode, http.StatusOK)
+	}
+	if want := (TestStruct{11, 99, ""}); !reflect.DeepEqual(got, want) {
+		t.Errorf("PostAndParseWithRetry() = %+v, want %+v", got, want)
+	}
+	if len(rt.requests) != 2 {
+		t.Errorf("got %d requests, want 2 (one retry)", len(rt.requests))
+	}
+}
+
+// TestNewWrapsCheckRedirect verifies that a CheckRedirect configured on the
+// caller's http.Client is still honoured, that the default redirect limit is
+// preserved when none was configured, and that the caller's client is not
+// mutated.
+func TestNewWrapsCheckRedirect(t *testing.T) {
+	t.Run("preserves caller CheckRedirect", func(t *testing.T) {
+		called := false
+		hc := &http.Client{CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			called = true
+			return nil
+		}}
+		logClient, err := New("http://example.com", hc, Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if hc.CheckRedirect == nil {
+			t.Fatal("New() mutated the caller's http.Client.CheckRedirect")
+		}
+		req := &http.Request{URL: mustParseURL(t, "http://example.com/x"), Header: http.Header{}}
+		via := []*http.Request{{URL: mustParseURL(t, "http://example.com/start")}}
+		if err := logClient.httpClient.CheckRedirect(req, via); err != nil {
+			t.Errorf("CheckRedirect() = %v, want nil", err)
+		}
+		if !called {
+			t.Error("caller-provided CheckRedirect was not invoked")
+		}
+	})
+
+	t.Run("default redirect limit", func(t *testing.T) {
+		logClient, err := New("http://example.com", &http.Client{}, Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := &http.Request{URL: mustParseURL(t, "http://example.com/x"), Header: http.Header{}}
+		via := make([]*http.Request, 10)
+		for i := range via {
+			via[i] = &http.Request{URL: mustParseURL(t, "http://example.com/start")}
+		}
+		if err := logClient.httpClient.CheckRedirect(req, via); err == nil ||
+			!strings.Contains(err.Error(), "stopped after 10 redirects") {
+			t.Errorf("CheckRedirect() = %v, want error containing %q", err, "stopped after 10 redirects")
+		}
+	})
+}
+
+func mustParseURL(t *testing.T, raw string) *url.URL {
+	t.Helper()
+	u, err := url.Parse(raw)
+	if err != nil {
+		t.Fatalf("failed to parse %q: %v", raw, err)
+	}
+	return u
 }
