@@ -158,8 +158,11 @@ func (s *Scanner) processMatcherLeafEntry(matcher LeafMatcher, info entryInfo, f
 	}
 
 	rawLogEntry, err := ct.RawLogEntryFromLeaf(info.index, &info.entry)
-	if rawLogEntry == nil {
+	if err != nil {
 		return fmt.Errorf("failed to build raw log entry %d: %v", info.index, err)
+	}
+	if rawLogEntry == nil {
+		return fmt.Errorf("failed to build raw log entry %d: no entry", info.index)
 	}
 	switch eType := rawLogEntry.Leaf.TimestampedEntry.EntryType; eType {
 	case ct.X509LogEntryType:

@@ -15,6 +15,7 @@
 package ct
 
 import (
+	"bytes"
 	"crypto"
 	"crypto/sha256"
 	"fmt"
@@ -220,6 +221,9 @@ func IsPreIssuer(issuer *x509.Certificate) bool {
 
 // RawLogEntryFromLeaf converts a LeafEntry object (which has the raw leaf data
 // after JSON parsing) into a RawLogEntry object (i.e. a TLS-parsed structure).
+// Before returning, it verifies that every supplied Chain certificate is the
+// named issuer of the preceding certificate. An empty chain is allowed because
+// a log may omit a terminal root.
 func RawLogEntryFromLeaf(index int64, entry *LeafEntry) (*RawLogEntry, error) {
 	ret := RawLogEntry{Index: index}
 	if rest, err := tls.Unmarshal(entry.LeafInput, &ret.Leaf); err != nil {
@@ -255,7 +259,56 @@ func RawLogEntryFromLeaf(index int64, entry *LeafEntry) (*RawLogEntry, error) {
 		return nil, fmt.Errorf("unknown entry type: %v", eType)
 	}
 
+	if err := verifyRawLogEntryChain(&ret); err != nil {
+		return nil, err
+	}
+
 	return &ret, nil
+}
+
+// verifyRawLogEntryChain confirms that every supplied chain certificate is
+// the named issuer of the preceding certificate.  CT's get-entries response
+// supplies the chain in leaf-issuer-first order, so checking each adjacent
+// pair also detects an unrelated certificate inserted at either boundary.
+//
+// An empty chain is left untouched: some entries omit the root, and an absent
+// chain cannot introduce an unrelated root as evidence.  This check is limited
+// to identity and signature ownership; it deliberately does not apply validity
+// periods, trust roots, or path-policy checks because CT observes certificates
+// rather than deciding whether they should be trusted.
+func verifyRawLogEntryChain(entry *RawLogEntry) error {
+	if len(entry.Chain) == 0 {
+		return nil
+	}
+
+	leaf, err := x509.ParseCertificate(entry.Cert.Data)
+	if x509.IsFatal(err) {
+		return fmt.Errorf("failed to parse certificate in chain check: %v", err)
+	}
+	if leaf == nil {
+		return fmt.Errorf("failed to parse certificate in chain check: no certificate")
+	}
+
+	child := leaf
+	for i, chainCert := range entry.Chain {
+		issuer, err := x509.ParseCertificate(chainCert.Data)
+		if x509.IsFatal(err) {
+			return fmt.Errorf("failed to parse chain certificate %d: %v", i, err)
+		}
+		if issuer == nil {
+			return fmt.Errorf("failed to parse chain certificate %d: no certificate", i)
+		}
+
+		if !bytes.Equal(child.RawIssuer, issuer.RawSubject) {
+			return fmt.Errorf("chain certificate %d is not the named issuer of the preceding certificate", i)
+		}
+		if err := issuer.CheckSignature(child.SignatureAlgorithm, child.RawTBSCertificate, child.Signature); err != nil {
+			return fmt.Errorf("chain certificate %d does not issue the preceding certificate: %v", i, err)
+		}
+
+		child = issuer
+	}
+	return nil
 }
 
 // ToLogEntry converts RawLogEntry to a LogEntry, which includes an x509-parsed
